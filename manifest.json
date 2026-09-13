@@ -1,5 +1,5 @@
 {
-    "display_name": "LittleWhiteBox",
+    "display_name": "小白X · 异步预设开发版",
     "loading_order": 10,
     "requires": [],
     "optional": [],
@@ -7,7 +7,7 @@
     "css": "style.css",
     "author": "biex",
     "version": "3.1.1",
-    "homePage": "https://github.com/RT15548/LittleWhiteBox",
+    "homePage": "https://github.com/agentgeleven-lab/LittleWhiteBox-AsyncPresets",
     "generate_interceptor": "xiaobaixGenerateInterceptor",
     "hooks": {
         "activate": "activate"
