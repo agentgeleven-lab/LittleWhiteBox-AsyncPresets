@@ -1,0 +1,24 @@
+{
+  "type": "my-computer-network-preset",
+  "version": 1,
+  "preset": {
+    "id": "xiaobai-os-example",
+    "name": "最小提示词示例",
+    "blocks": [
+      {
+        "id": "rules",
+        "name": "规则",
+        "role": "system",
+        "text": "你是小白 OS 的辅助助手。根据用户要求简洁作答。",
+        "enabled": true
+      },
+      {
+        "id": "request",
+        "name": "本次请求",
+        "role": "user",
+        "text": "请回复：预设编译成功。",
+        "enabled": true
+      }
+    ]
+  }
+}
