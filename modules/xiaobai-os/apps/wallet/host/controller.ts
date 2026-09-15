@@ -1,4 +1,4 @@
-import type { EconomyReadCapability } from '../../../capabilities/economy/index.js';
+import type { EconomyReadCapability, EconomyBalanceCapability } from '../../../capabilities/economy/index.js';
 import type { XiaobaiOsExecutionScope } from '../../../kernel/execution-scope.js';
 import type { XiaobaiOsFileControls } from '../../../kernel/contracts.js';
 import type { EconomyTransaction, EconomyTransactionPage } from '../../../domains/economy/types.js';
@@ -24,6 +24,7 @@ const WALLET_SOURCE_LABELS: Readonly<Record<string, string>> = Object.freeze({
     tasks: '任务',
     bank: '银行',
     shop: '商店',
+    wallet: '钱包',
 });
 const WALLET_TRANSACTION_TITLES: Readonly<Record<string, string>> = Object.freeze({
     'Game stake escrow': '游戏下注',
@@ -39,6 +40,7 @@ interface WalletActivation {
 
 export interface WalletControllerDependencies {
     economy: EconomyReadCapability;
+    adjustBalance?: EconomyBalanceCapability['setPlayerBalance'];
     confirmPending: XiaobaiOsFileControls['retryPending'];
     getChatIdentity: () => XiaobaiOsChatIdentity | { key?: unknown } | string | null;
     execution?: XiaobaiOsExecutionScope;
@@ -101,6 +103,7 @@ function resolveStatus(
 
 export function createWalletController({
     economy,
+    adjustBalance,
     confirmPending,
     getChatIdentity,
     execution,
@@ -186,6 +189,19 @@ export function createWalletController({
     async function handleMessage(message: XiaobaiOsHostFrameMessage): Promise<unknown> {
         const payload = isRecord(message.payload) ? message.payload : {};
         const current = assertActivation(payload);
+        if (message.type === 'wallet/set-balance') {
+            if (!adjustBalance || buildState(current.chatIdentity).status !== 'ready') {
+                throw new Error('余额暂时无法修改，请先核实保存或重新读取');
+            }
+            await adjustBalance({
+                balance: payload.balance as number,
+                expectedBalance: payload.expectedBalance as number,
+                expectedTransactionCount: payload.expectedTransactionCount as number,
+                actionId: payload.actionId as string,
+            }, () => isCurrent(current));
+            if (!isCurrent(current)) { throw new Error('聊天已切换，请重新打开钱包'); }
+            return emitState(current);
+        }
         if (message.type === 'wallet/confirm-save') {
             preparation = null;
             const confirmation = await confirmPending();

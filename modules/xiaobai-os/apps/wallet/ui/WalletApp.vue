@@ -15,6 +15,12 @@ const props = defineProps<XiaobaiOsAppProps>();
 const state = ref(structuredClone(toRaw(props.initialState as WalletClientState)));
 const refreshing = ref(false);
 const loadingMore = ref(false);
+const editingBalance = ref(false);
+const balanceInput = ref('');
+const adjustingBalance = ref(false);
+const balanceError = ref('');
+const balanceNotice = ref('');
+let alive = true;
 const errorMessage = ref('');
 const loadMoreError = ref('');
 const selectedTransaction = ref<WalletTransactionView | null>(null);
@@ -22,7 +28,9 @@ let unsubscribe = () => {};
 let requestGeneration = 0;
 
 const requiresConfirmation = computed(() => state.value.status === 'unconfirmed');
-const actionBusy = computed(() => refreshing.value || state.value.status === 'loading' || state.value.status === 'saving');
+const actionBusy = computed(() => adjustingBalance.value || refreshing.value || state.value.status === 'loading' || state.value.status === 'saving');
+const validBalance = computed(() => /^\d+$/.test(balanceInput.value.trim())
+    && Number.isSafeInteger(Number(balanceInput.value)));
 const refreshDisabled = computed(() => actionBusy.value || requiresConfirmation.value || state.value.status === 'conflict');
 const noticeVisible = computed(() => Boolean(state.value.message || errorMessage.value));
 
@@ -47,6 +55,39 @@ function readableError(error: unknown): string {
 
 function binding(): { chatIdentity: string } {
     return { chatIdentity: state.value.chatIdentity };
+}
+
+function openBalanceEditor(): void {
+    balanceInput.value = String(state.value.balance);
+    balanceError.value = '';
+    balanceNotice.value = '';
+    editingBalance.value = true;
+}
+
+async function saveBalance(): Promise<void> {
+    if (actionBusy.value || state.value.status !== 'ready' || !validBalance.value) { return; }
+    const chatIdentity = state.value.chatIdentity;
+    adjustingBalance.value = true;
+    balanceError.value = '';
+    try {
+        const response = await props.bridge.request('wallet/set-balance', {
+            chatIdentity, balance: Number(balanceInput.value),
+            expectedBalance: state.value.balance,
+            expectedTransactionCount: state.value.transactionCount,
+            actionId: crypto.randomUUID(),
+        }, REQUEST_TIMEOUT_MS) as { result: WalletClientState };
+        if (!alive || chatIdentity !== state.value.chatIdentity) { return; }
+        applyState(response.result);
+        editingBalance.value = false;
+        balanceNotice.value = '余额已保存';
+    } catch (error) {
+        if (!alive || chatIdentity !== state.value.chatIdentity) { return; }
+        const message = error instanceof Error ? error.message : String(error);
+        balanceError.value = message.includes('余额') || message.includes('聊天')
+            ? message : '修改未确认，请重新读取或核实保存结果后再试。';
+    } finally {
+        if (alive) { adjustingBalance.value = false; }
+    }
 }
 
 function applyState(next: WalletClientState): void {
@@ -127,6 +168,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+    alive = false;
     requestGeneration += 1;
     unsubscribe();
 });
@@ -138,6 +180,33 @@ onBeforeUnmount(() => {
 
         <div class="wallet-ui-scroll">
             <WalletBalanceCard :balance="state.balance" :currency="state.currency" :status="state.status" />
+            <section class="wallet-balance-editor" aria-label="修改小白币余额">
+                <button
+                    v-if="!editingBalance" type="button" class="wallet-ui-text-button"
+                    :disabled="actionBusy || state.status !== 'ready'" @click="openBalanceEditor"
+                >
+                    修改余额
+                </button>
+                <form v-else @submit.prevent="saveBalance">
+                    <label for="wallet-new-balance">新的小白币余额</label>
+                    <input
+                        id="wallet-new-balance" v-model="balanceInput" type="text" inputmode="numeric"
+                        autocomplete="off" :disabled="adjustingBalance" aria-describedby="wallet-balance-help"
+                    >
+                    <small id="wallet-balance-help">输入 0 或正整数，保存后立即生效。</small>
+                    <div class="wallet-balance-actions">
+                        <button
+                            type="submit" class="wallet-ui-text-button"
+                            :disabled="!validBalance || actionBusy || state.status !== 'ready'"
+                        >
+                            {{ adjustingBalance ? '正在保存…' : '保存余额' }}
+                        </button>
+                        <button type="button" class="wallet-ui-text-button" :disabled="adjustingBalance" @click="editingBalance = false">取消</button>
+                    </div>
+                    <p v-if="balanceError" role="alert">{{ balanceError }}</p>
+                </form>
+                <small v-if="balanceNotice" role="status">{{ balanceNotice }}</small>
+            </section>
 
             <WalletNotice
                 v-if="noticeVisible"

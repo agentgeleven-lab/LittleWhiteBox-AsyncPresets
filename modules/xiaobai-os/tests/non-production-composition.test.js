@@ -124,7 +124,7 @@ test('the non-production composition installs D1 modules through declared capabi
     assert.equal(agentApiModule.partition, undefined);
     assert.deepEqual(agentApiModule.capabilities.map(token => token.id), ['agent.shared']);
     assert.equal(walletModule.partition, undefined);
-    assert.deepEqual(walletModule.capabilities.map(token => token.id), ['economy.read']);
+    assert.deepEqual(walletModule.capabilities.map(token => token.id), ['economy.read', 'economy.balance-adjustment']);
 
     const empty = await fourthWallRepository.prepareCurrentChatFourthWall();
     assert.equal(empty.activeSessionId, 'default');

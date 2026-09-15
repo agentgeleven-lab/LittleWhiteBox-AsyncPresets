@@ -127,7 +127,7 @@ function ze(t) {
 var Xe = Object.freeze({
   "agent-api": () => import("./xiaobai-os-AgentApiApp-z8OrvILC.js"),
   "fourth-wall": () => import("./xiaobai-os-FourthWallApp-BbdoC8Vd.js"),
-  wallet: () => import("./xiaobai-os-WalletApp-C2rvmt0H.js"),
+  wallet: () => import("./xiaobai-os-WalletApp-oIvfBKDm.js"),
   shop: () => import("./xiaobai-os-ShopApp-DJZa8a6R.js"),
   bank: () => import("./xiaobai-os-BankApp-BMIfVPMr.js"),
   game: () => import("./xiaobai-os-GameApp-DNioEvHp.js"),

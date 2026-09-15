@@ -60,6 +60,66 @@ export const ECONOMY_READ_CAPABILITY: CapabilityToken<EconomyReadCapability> =
 export const ECONOMY_TRANSACTION_CAPABILITY: CapabilityToken<EconomyTransactionCapability> =
     createCapabilityToken('economy.transaction');
 
+// Modified: explicit manual balance adjustments append to the canonical ledger.
+export interface EconomyBalanceAdjustment {
+    balance: number;
+    expectedBalance: number;
+    expectedTransactionCount: number;
+    actionId: string;
+}
+export interface EconomyBalanceCapability {
+    setPlayerBalance(input: EconomyBalanceAdjustment, commitGuard?: () => boolean): Promise<void>;
+}
+export const ECONOMY_BALANCE_CAPABILITY: CapabilityToken<EconomyBalanceCapability> =
+    createCapabilityToken('economy.balance-adjustment');
+
+function installedBalanceCapability(store: ScopedChatStore<EconomyLedgerV2>): EconomyBalanceCapability {
+    return Object.freeze({
+        async setPlayerBalance(input: EconomyBalanceAdjustment, commitGuard?: () => boolean) {
+            if (!Number.isSafeInteger(input.balance) || input.balance < 0
+                || !Number.isSafeInteger(input.expectedBalance) || input.expectedBalance < 0
+                || !Number.isSafeInteger(input.expectedTransactionCount) || input.expectedTransactionCount < 1
+                || typeof input.actionId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(input.actionId)) {
+                throw new Error('余额必须是有效的非负整数，请重新输入');
+            }
+            const actionId = `wallet:balance:${input.actionId}`;
+            const result = await store.transact(transaction => {
+                if (commitGuard && !commitGuard()) { throw new Error('聊天已切换，请重新打开钱包'); }
+                const ledger = transaction.current;
+                if (!ledger) { throw new Error('钱包尚未完成开户'); }
+                const sourceId = `balance:${input.balance}`;
+                const existing = ledger.transactions.find(item => item.actionId === actionId);
+                if (existing) {
+                    if (existing.sourceDomain !== 'wallet' || existing.sourceId !== sourceId) {
+                        throw new Error('余额调整请求重复，请重新打开修改余额');
+                    }
+                    return;
+                }
+                const balance = projectBalances(ledger).player ?? 0;
+                if (balance !== input.expectedBalance || ledger.transactions.length !== input.expectedTransactionCount) {
+                    throw new Error('余额或账单已变化，请重新读取后修改');
+                }
+                const difference = input.balance - balance;
+                if (difference === 0) { return; }
+                const next = postAction(ledger, [{
+                    actionId, idempotencyKey: actionId,
+                    fromAccountId: difference > 0 ? 'system:mint' : 'player',
+                    toAccountId: difference > 0 ? 'player' : 'system:sink',
+                    amount: Math.abs(difference), kind: 'manual_adjustment',
+                    title: '手动修改余额', note: `${balance} → ${input.balance} 小白币`,
+                    sourceDomain: 'wallet', sourceId,
+                }]);
+                transaction.replace(next.ledger);
+            }, { commitGuard });
+            if (result.status === 'confirmed' || result.status === 'unchanged') { return; }
+            throw Object.assign(new Error(result.status === 'failed'
+                ? result.error.message : '余额保存尚未确认，请先核实保存结果'), {
+                uncertain: result.status === 'unconfirmed',
+            });
+        },
+    });
+}
+
 export const ECONOMY_PARTITION: PartitionRegistration<EconomyLedgerV2> = Object.freeze({
     key: ECONOMY_PARTITION_KEY,
     ownerId: 'economy',
@@ -254,7 +314,18 @@ export function createEconomyCapabilityRegistrations({
         accountNamespaces.set(requesterId, namespace);
     }
     const disposers = new WeakMap<object, () => void>();
+    const balanceCapabilities = new WeakMap<object, EconomyBalanceCapability>();
     return Object.freeze([
+        {
+            token: ECONOMY_BALANCE_CAPABILITY,
+            ownerId: 'economy',
+            dependencies: [ECONOMY_READ_CAPABILITY],
+            install(context) {
+                const capability = balanceCapabilities.get(context.require(ECONOMY_READ_CAPABILITY));
+                if (!capability) { throw new Error('Economy partition is unavailable'); }
+                return capability;
+            },
+        },
         {
             token: ECONOMY_READ_CAPABILITY,
             ownerId: 'economy',
@@ -269,6 +340,8 @@ export function createEconomyCapabilityRegistrations({
                     context.files,
                 );
                 disposers.set(installed.capability, installed.dispose);
+                balanceCapabilities.set(installed.capability,
+                    installedBalanceCapability(context.partition as ScopedChatStore<EconomyLedgerV2>));
                 return installed.capability;
             },
             dispose(instance) { disposers.get(instance as object)?.(); },

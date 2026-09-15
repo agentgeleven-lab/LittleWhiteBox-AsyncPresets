@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
     createEconomyCapabilityRegistrations,
     ECONOMY_READ_CAPABILITY,
+    ECONOMY_BALANCE_CAPABILITY,
 } from '../capabilities/economy/index.js';
 import { createWalletController } from '../apps/wallet/host/controller.js';
 import { ensureEconomy, postTransaction } from '../domains/economy/ledger.js';
@@ -120,6 +121,7 @@ async function createHarness({ openingResult = 'confirmed', ledger = null } = {}
     const economy = composition.capabilities.require(ECONOMY_READ_CAPABILITY);
     const controller = createWalletController({
         economy,
+        adjustBalance: composition.capabilities.require(ECONOMY_BALANCE_CAPABILITY).setPlayerBalance,
         confirmPending: composition.transactions.retryPending,
         getChatIdentity: () => host.identity,
     });
@@ -130,6 +132,74 @@ async function createHarness({ openingResult = 'confirmed', ledger = null } = {}
 function activation(host) {
     return { post: (type, payload) => { host.posts.push({ type, payload }); return true; } };
 }
+
+function balanceRequest(harness, balance, actionId = 'test-adjust') {
+    return { type: 'wallet/set-balance', payload: {
+        chatIdentity: harness.host.identity.key, balance, actionId,
+        expectedBalance: harness.economy.getPlayerBalance(),
+        expectedTransactionCount: harness.economy.getTransactionCount(),
+    } };
+}
+
+test('manual balance edits increase, decrease and zero persisted money without rewriting history', async () => {
+    const harness = await createHarness({ ledger: ledgerWithTransactions(2) });
+    await harness.controller.activate(activation(harness.host));
+    const original = structuredClone(harness.host.persisted.partitions.economy.transactions);
+    for (const balance of [10000, 50, 0]) {
+        const result = await harness.controller.handleMessage(balanceRequest(harness, balance, `set-${balance}`));
+        assert.equal(result.balance, balance);
+        await harness.economy.refresh();
+        assert.equal(harness.economy.getPlayerBalance(), balance);
+        assert.equal(result.transactions[0].title, '手动修改余额');
+    }
+    assert.deepEqual(harness.host.persisted.partitions.economy.transactions.slice(0, 2), original);
+    const reloaded = await createHarness({ ledger: harness.host.persisted.partitions.economy });
+    assert.equal(reloaded.economy.getPlayerBalance(), 0);
+});
+
+test('manual adjustments reject invalid values and stale state; identical submissions are idempotent', async () => {
+    const harness = await createHarness({ ledger: ledgerWithTransactions(1) });
+    await harness.controller.activate(activation(harness.host));
+    for (const balance of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '100']) {
+        await assert.rejects(harness.controller.handleMessage(balanceRequest(harness, balance)), /非负整数/);
+    }
+    assert.equal(harness.host.writes, 0);
+    await harness.controller.handleMessage(balanceRequest(harness, 100, 'unchanged'));
+    assert.equal(harness.host.writes, 0);
+    const request = balanceRequest(harness, 999);
+    const stale = balanceRequest(harness, 200, 'stale');
+    await harness.controller.handleMessage(request);
+    await harness.controller.handleMessage(request);
+    assert.equal(harness.host.writes, 1);
+    await assert.rejects(harness.controller.handleMessage(stale), /已变化/);
+    await assert.rejects(harness.controller.handleMessage(balanceRequest(harness, 1000)), /重复/);
+    assert.equal(harness.economy.getPlayerBalance(), 999);
+});
+
+test('manual adjustment preserves confirmed balance on failed save and confirms uncertain save once', async () => {
+    const failed = await createHarness({ ledger: ledgerWithTransactions(1), openingResult: 'failed' });
+    await failed.controller.activate(activation(failed.host));
+    await assert.rejects(failed.controller.handleMessage(balanceRequest(failed, 500)));
+    assert.equal(failed.economy.getPlayerBalance(), 100);
+    const pending = await createHarness({ ledger: ledgerWithTransactions(1), openingResult: 'unconfirmed' });
+    await pending.controller.activate(activation(pending.host));
+    await assert.rejects(pending.controller.handleMessage(balanceRequest(pending, 500)), /尚未确认/);
+    assert.equal(pending.economy.getPlayerBalance(), 100);
+    await assert.rejects(pending.controller.handleMessage(balanceRequest(pending, 600)), /暂时无法修改/);
+    await pending.controller.handleMessage({ type: 'wallet/confirm-save', payload: { chatIdentity: pending.host.identity.key } });
+    assert.equal(pending.economy.getPlayerBalance(), 500);
+    assert.equal(pending.host.writes, 1);
+});
+
+test('manual balance adjustment cannot write after switching chats', async () => {
+    const harness = await createHarness({ ledger: ledgerWithTransactions(1) });
+    await harness.controller.activate(activation(harness.host));
+    const request = balanceRequest(harness, 500);
+    const pending = harness.controller.handleMessage(request);
+    harness.host.identity = { key: 'other-chat' };
+    await assert.rejects(pending);
+    assert.equal(harness.host.writes, 0);
+});
 
 test('Wallet opens explicitly once while existing Economy data is read-only', async () => {
     const fresh = await createHarness();

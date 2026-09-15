@@ -1,5 +1,6 @@
 import {
     ECONOMY_READ_CAPABILITY,
+    ECONOMY_BALANCE_CAPABILITY,
     type EconomyReadCapability,
 } from '../../capabilities/economy/index.js';
 import type { AppInstallContext, XiaobaiOsAppModule } from '../../kernel/app-registry.js';
@@ -18,12 +19,13 @@ export interface WalletModuleDependencies {
 export function createWalletModule(dependencies: WalletModuleDependencies): XiaobaiOsAppModule {
     return {
         descriptor: WALLET_APP_DESCRIPTOR,
-        capabilities: [ECONOMY_READ_CAPABILITY],
+        capabilities: [ECONOMY_READ_CAPABILITY, ECONOMY_BALANCE_CAPABILITY],
         async install(context) {
             const economy = context.useCapability(ECONOMY_READ_CAPABILITY);
             return dependencies.createRuntime?.(economy, context.execution)
                 ?? createWalletController({
                     economy,
+                    adjustBalance: context.useCapability(ECONOMY_BALANCE_CAPABILITY).setPlayerBalance,
                     confirmPending: context.files.retryPending,
                     getChatIdentity: dependencies.getChatIdentity,
                     execution: context.execution,
