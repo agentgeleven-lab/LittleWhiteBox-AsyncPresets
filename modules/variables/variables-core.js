@@ -29,7 +29,8 @@ import {
     applyXbGetVarForMessage,
     parseValueForSet,  
 } from "./var-commands.js";
-import { applyStateForMessage } from "./state2/index.js";
+// Modified: unchanged State edits bypass rollback, including external rollback hooks.
+import { applyStateForMessage, isStateContentUnchanged } from "./state2/index.js";
 import {
     preprocessBumpAliases,
     executeQueuedVareventJsAfterTurn,
@@ -2531,6 +2532,10 @@ function bindEvents() {
                     suppressUpdatedOnce.delete(id);
                     return;
                 }
+                if (getVariablesMode() === '2.0'
+                    && isStateContentUnchanged(id, readMessageText(getContext()?.chat?.[id]))) {
+                    return;
+                }
                 await applyVarsForMessage(id);
                 applyXbGetVarForMessage(id, true);
             }
@@ -2543,6 +2548,11 @@ function bindEvents() {
             const id = getMsgIdLoose(data);
             if (typeof id !== 'number') return;
 
+            if (getVariablesMode() === '2.0'
+                && isStateContentUnchanged(id, readMessageText(getContext()?.chat?.[id]))) {
+                return;
+            }
+
             if (getVariablesMode() !== '2.0') clearAppliedFor(id);
 
             // Roll back first so re-apply uses the edited message
@@ -2550,6 +2560,10 @@ function bindEvents() {
 
             setTimeout(async () => {
                 await applyVarsForMessage(id);
+                if (getVariablesMode() === '2.0') {
+                    const mod = await import('./state2/index.js');
+                    await mod.restoreStateV2ToFloor((getContext()?.chat?.length || 0) - 1);
+                }
                 applyXbGetVarForMessage(id, true);
 
                 try {

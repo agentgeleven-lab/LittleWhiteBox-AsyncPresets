@@ -4,6 +4,8 @@ import { extractStateBlocks, computeStateSignature, parseStateBlock } from './pa
 import { generateSemantic } from './semantic.js';
 import { validate, setRule, loadRulesFromMeta, saveRulesToMeta } from './guard.js';
 
+// Modified: preserve non-State variables and skip unchanged message edits.
+
 /**
  * =========================
  * Path / JSON helpers
@@ -344,7 +346,7 @@ function getEffectiveOwnedRoots() {
 }
 
 function scopedMergeRootObject(current, restored, roots) {
-    const next = deepClone(current || {});
+    const next = { ...(current || {}) };
     const source = restored || {};
     for (const root of roots || []) {
         if (Object.prototype.hasOwnProperty.call(source, root)) {
@@ -383,7 +385,7 @@ function saveWalRecord(floor, signature, rules, ops, roots = []) {
 }
 
 /**
- * checkpoint = 执行完 floor 后的全量变量+规则
+ * Checkpoints contain only explicitly State-owned roots and rules.
  */
 function saveCheckpointIfNeeded(floor) {
     const ckpt = getCheckpointStore();
@@ -396,9 +398,10 @@ function saveCheckpointIfNeeded(floor) {
 
     const ctx = getContext();
     const meta = ctx?.chatMetadata || {};
-    const vars = deepClone(meta.variables || {});
+    const roots = getEffectiveOwnedRoots();
+    const vars = scopedMergeRootObject({}, meta.variables || {}, roots);
     // 2.0 rules 存在 chatMetadata 里（guard.js 写入的位置）
-    const rules = deepClone(meta.LWB_RULES_V2 || {});
+    const rules = scopedMergeRules({}, meta.LWB_RULES_V2 || {}, roots);
 
     ckpt.points[String(floor)] = { vars, rules, ts: Date.now() };
     ctx?.saveMetadataDebounced?.();
@@ -415,6 +418,18 @@ function getAppliedMap() {
     const meta = getContext()?.chatMetadata || {};
     meta[LWB_STATE_APPLIED_KEY] ||= {};
     return meta[LWB_STATE_APPLIED_KEY];
+}
+
+function effectiveStateContent(text) {
+    return JSON.stringify(extractStateBlocks(text).map(block => block.replace(/\r\n/g, '\n').trim()));
+}
+
+// Read only: WAL survives chat reloads and applied-marker invalidation.
+export function isStateContentUnchanged(messageId, messageContent) {
+    const meta = getContext()?.chatMetadata;
+    const previous = meta?.extensions?.[EXT_ID]?.[LOG_KEY]?.floors?.[String(messageId)]?.signature
+        ?? meta?.[LWB_STATE_APPLIED_KEY]?.[messageId] ?? '';
+    return effectiveStateContent(previous) === effectiveStateContent(messageContent);
 }
 
 export function clearStateAppliedFor(floor) {
@@ -515,7 +530,7 @@ export function applyStateForMessage(messageId, messageContent) {
     }
 
     const appliedMap = getAppliedMap();
-    if (appliedMap[messageId] === signature) {
+    if (appliedMap[messageId] && effectiveStateContent(appliedMap[messageId]) === effectiveStateContent(signature)) {
         return { atoms: [], errors: [], skipped: true };
     }
     const atoms = [];
@@ -524,6 +539,7 @@ export function applyStateForMessage(messageId, messageContent) {
 
     const mergedRules = [];
     const mergedOps = [];
+    const appliedOps = [];
 
     for (const block of blocks) {
         const parsed = parseStateBlock(block);
@@ -615,6 +631,7 @@ export function applyStateForMessage(messageId, messageContent) {
 
             const root = getRootFromPath(path);
             if (root) floorRoots.add(root);
+            appliedOps.push(opItem);
 
             const newValue = getVar(path);
 
@@ -636,7 +653,7 @@ export function applyStateForMessage(messageId, messageContent) {
         }
 
         // ✅ WAL：一次写入完整 rules/ops/roots，避免留下无 roots 的中间记录
-        saveWalRecord(messageId, signature, mergedRules, mergedOps, floorRoots);
+        saveWalRecord(messageId, signature, mergedRules, appliedOps, floorRoots);
     }
 
     appliedMap[messageId] = signature;
@@ -666,19 +683,26 @@ export async function restoreStateV2ToFloor(targetFloor) {
     const ctx = getContext();
     const meta = ctx?.chatMetadata || {};
     const floor = Number(targetFloor);
+    if (!Number.isInteger(floor)) return { ok: false };
     const ownedRoots = getEffectiveOwnedRoots();
 
-    if (!Number.isFinite(floor) || floor < 0) {
+    // A checkpoint after a rollback boundary is no longer a valid replay base.
+    const points = getCheckpointStore().points || {};
+    for (const key of Object.keys(points)) {
+        if (Number(key) > floor) delete points[key];
+    }
+
+    if (floor < 0) {
         // floor < 0 => only clear roots owned by State 2.0.
         meta.variables = scopedMergeRootObject(meta.variables || {}, {}, ownedRoots);
         meta.LWB_RULES_V2 = scopedMergeRules(meta.LWB_RULES_V2 || {}, {}, ownedRoots);
+        loadRulesFromMeta();
+        clearStateAppliedFrom(0);
         ctx?.saveMetadataDebounced?.();
         return { ok: true, usedCheckpoint: null };
     }
 
     const log = getStateLog();
-    const ckpt = getCheckpointStore();
-    const points = ckpt.points || {};
     const available = Object.keys(points)
         .map(Number)
         .filter(n => Number.isFinite(n) && n <= floor)
@@ -708,6 +732,9 @@ export async function restoreStateV2ToFloor(targetFloor) {
     for (let f = start; f <= floor; f++) {
         const rec = log.floors?.[String(f)];
         if (!rec) continue;
+        const recordRoots = Array.isArray(rec.roots)
+            ? new Set(rec.roots)
+            : collectRootsFromRulesOps(rec.rules, rec.ops);
 
         // 先应用 rules
         const rules = Array.isArray(rec.rules) ? rec.rules : [];
@@ -715,7 +742,7 @@ export async function restoreStateV2ToFloor(targetFloor) {
         for (const r of rules) {
             const p = r?.path;
             const rule = r?.rule;
-            if (p && rule && typeof rule === 'object') {
+            if (p && rule && typeof rule === 'object' && recordRoots.has(getRootFromPath(p))) {
                 setRule(normalizePath(p), rule);
                 touched = true;
             }
@@ -728,7 +755,7 @@ export async function restoreStateV2ToFloor(targetFloor) {
         for (const opItem of execOps) {
             const path = opItem?.path;
             const op = opItem?.op;
-            if (!path || !op) continue;
+            if (!path || !op || !recordRoots.has(getRootFromPath(path))) continue;
 
             const absPath = normalizePath(path);
             const oldValue = getVar(path);
@@ -771,6 +798,10 @@ export async function restoreStateV2ToFloor(targetFloor) {
 
     // 4) 清理 applied signature：floor 之后都要重新计算
     clearStateAppliedFrom(floor + 1);
+    const applied = getAppliedMap();
+    for (const [key, rec] of Object.entries(log.floors || {})) {
+        if (Number(key) <= floor) applied[key] = rec.signature;
+    }
 
     ctx?.saveMetadataDebounced?.();
     return { ok: true, usedCheckpoint: ck };

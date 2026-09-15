@@ -1,5 +1,6 @@
 export {
     applyStateForMessage,
+    isStateContentUnchanged,
     clearStateAppliedFor,
     clearStateAppliedFrom,
     restoreStateV2ToFloor,
